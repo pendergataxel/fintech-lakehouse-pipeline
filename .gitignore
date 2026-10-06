@@ -5,3 +5,7 @@ __pycache__/
 data/
 *.duckdb
 *.duckdb.wal
+data/raw/*.json
+data/dlq/*.json
+data/parquet/*.parquet
+.env
