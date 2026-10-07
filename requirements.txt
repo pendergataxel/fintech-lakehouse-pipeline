@@ -3,5 +3,4 @@ pydantic
 duckdb
 pandas
 streamlit
-pytest
-pyarrow
+plotly

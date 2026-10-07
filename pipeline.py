@@ -13,7 +13,7 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
 # Pull json files
-def load_raw_transactions(pattern: str) -> List[Dict[str, Any]]:
+def load_raw_transactions(pattern: str) -> Tuple[List[Dict[str, Any]], List[str]]:
 
     matched_files = glob.glob(pattern)
 
@@ -32,7 +32,7 @@ def load_raw_transactions(pattern: str) -> List[Dict[str, Any]]:
         except Exception as e:
             logging.error(f"Error reading {file_path}: {e}")
 
-    return all_events
+    return all_events, matched_files
 
 # Run through schema validation
 # Route corrupted records to dlq
@@ -80,33 +80,38 @@ def load_to_duckdb(transactions: List[FundTransferTransaction], db_name: str = '
     if raw_list:
         validated_data = pd.DataFrame(raw_list)
 
-        # Update cloud database table
-        conn.execute('CREATE OR REPLACE TABLE transfers AS SELECT * FROM validated_data')
+        
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS transfers AS 
+            SELECT * FROM validated_data
+            WHERE FALSE
+        """)
+
+        # Only insert new transaction ids
+        conn.execute("""
+            INSERT INTO transfers
+            SELECT * FROM validated_data
+            WHERE transaction_id NOT IN (
+                SELECT transaction_id FROM transfers
+            )
+        """)
+
         logging.info(f'Successfully loaded {len(validated_data)} records into MotherDuck cloud table "transfers".')
 
-        # Update single local Parquet snapshot on disk
-        parquet_path = Path('data/parquet/transfers').resolve()
-        parquet_path.mkdir(parents=True, exist_ok=True)
-
-        target_file = parquet_path / "transfers.parquet"
-
-        # Write directly to disk
-        validated_data.to_parquet(str(target_file), index=False)
-        logging.info(f"Local Parquet snapshot overwritten at '{target_file}'.")
 
     else:
         logging.warning('No valid data to load into MotherDuck.')
 
     return conn
 
-# MAIN FUNCTION
+
 
 def main() -> None:
 
     file_pattern = 'data/raw/raw_transactions_*.json'
 
     logging.info('Starting data pipeline...')
-    raw_transactions = load_raw_transactions(file_pattern)
+    raw_transactions, processed_files = load_raw_transactions(file_pattern)
 
     if not raw_transactions:
         logging.warning("Pipeline execution stopped: No raw transaction files found to process.")
@@ -116,10 +121,15 @@ def main() -> None:
     validated_transactions, dropped_count = validate_transactions(raw_transactions)
     logging.info(f'Validation complete: {len(validated_transactions)} passed, {dropped_count} sent to DLQ.')
 
-    logging.info('Loading validated transactions into DuckDB...')
+    logging.info('Loading validated transactions into MotherDuck...')
     conn = load_to_duckdb(validated_transactions)
 
     conn.close()
+
+    for file_path in processed_files:
+        destination = Path('data/processed') / Path(file_path).name
+        Path(file_path).rename(destination)
+
     logging.info('Pipeline finished successfully.')
 
 if __name__ == "__main__":
